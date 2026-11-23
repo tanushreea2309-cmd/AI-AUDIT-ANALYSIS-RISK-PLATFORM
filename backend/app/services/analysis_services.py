@@ -139,6 +139,17 @@ class AnalysisService:
             )
 
         return final_findings
+    @staticmethod
+    def get_all_analyses():
+        response = (
+            supabase
+            .table("analyses")
+            .select("*, datasets(*, clients(*))")
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        return response.data or []
 
     @staticmethod
     def run_analysis(dataset_id: str):

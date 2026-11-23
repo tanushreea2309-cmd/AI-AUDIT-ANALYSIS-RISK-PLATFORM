@@ -1,9 +1,11 @@
 import json
 import math
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
+from fastapi import HTTPException
 
 from app.core.supabase_client import supabase
 from app.services.validation_service import ValidationService
@@ -37,15 +39,20 @@ class DatasetService:
         filename = uploaded_file.filename
 
         if not filename:
-            raise ValueError("No file selected")
+            raise HTTPException(status_code=400, detail="No file selected.")
 
         extension = filename.split(".")[-1].lower()
         allowed_types = ["csv", "xlsx", "json"]
 
         if extension not in allowed_types:
-            raise ValueError("Only CSV, XLSX and JSON files are supported")
+            raise HTTPException(
+                status_code=400,
+                detail="Only CSV, XLSX and JSON files are supported."
+            )
 
-        file_path = UPLOAD_DIR / filename
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        safe_filename = f"{timestamp}_{filename}"
+        file_path = UPLOAD_DIR / safe_filename
 
         with open(file_path, "wb") as buffer:
             buffer.write(uploaded_file.file.read())
@@ -76,7 +83,7 @@ class DatasetService:
             dataframe = pd.DataFrame(data)
 
         else:
-            raise ValueError("Unsupported file type")
+            raise HTTPException(status_code=400, detail="Unsupported file type.")
 
         validation = ValidationService.validate_dataframe(dataframe)
 
@@ -91,7 +98,7 @@ class DatasetService:
             "file_path": str(file_path),
             "total_records": len(dataframe),
             "total_columns": len(dataframe.columns),
-            "upload_status": validation["status"]
+            "upload_status": validation["status"],
         }
 
         response = (
@@ -102,9 +109,12 @@ class DatasetService:
         )
 
         if not response.data:
-            return {"error": "Failed to save dataset metadata"}
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save dataset metadata."
+            )
 
-        dataset = response.data[0]
+        dataset = cast(dict[str, Any], response.data[0])
 
         preview = (
             dataframe
@@ -114,14 +124,14 @@ class DatasetService:
             .to_dict(orient="records")
         )
 
-        result = {
-            "dataset": dataset,
-            "preview": preview,
-            "validation": validation,
-            "mapping": mapping
-        }
-
-        return clean_for_json(result)
+        return clean_for_json(
+            {
+                "dataset": dataset,
+                "preview": preview,
+                "validation": validation,
+                "mapping": mapping,
+            }
+        )
 
     @staticmethod
     def get_all_datasets():
@@ -133,4 +143,92 @@ class DatasetService:
             .execute()
         )
 
-        return response.data
+        return response.data or []
+
+    @staticmethod
+    def get_dataset(dataset_id: str):
+        response = (
+            supabase
+            .table("datasets")
+            .select("*, clients(*)")
+            .eq("id", dataset_id)
+            .execute()
+        )
+
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Dataset not found.")
+
+        return cast(dict[str, Any], response.data[0])
+
+    @staticmethod
+    def delete_dataset(dataset_id: str):
+        dataset = cast(dict[str, Any], DatasetService.get_dataset(dataset_id))
+        file_path = str(dataset.get("file_path") or "")
+
+        response = (
+            supabase
+            .table("datasets")
+            .delete()
+            .eq("id", dataset_id)
+            .execute()
+        )
+
+        if not response.data:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete dataset."
+            )
+
+        if file_path:
+            path = Path(file_path)
+
+            if path.exists():
+                path.unlink()
+
+        return {
+            "message": "Dataset deleted successfully.",
+            "dataset_id": dataset_id,
+        }
+
+    @staticmethod
+    def cleanup_old_datasets(days: int = 30):
+        cutoff_date = datetime.now() - timedelta(days=days)
+
+        old_response = (
+            supabase
+            .table("datasets")
+            .select("*")
+            .lt("upload_date", cutoff_date.isoformat())
+            .execute()
+        )
+
+        old_datasets = old_response.data or []
+        deleted_count = 0
+
+        for dataset_raw in old_datasets:
+            dataset = cast(dict[str, Any], dataset_raw)
+
+            dataset_id = str(dataset.get("id") or "")
+            file_path = str(dataset.get("file_path") or "")
+
+            if dataset_id:
+                (
+                    supabase
+                    .table("datasets")
+                    .delete()
+                    .eq("id", dataset_id)
+                    .execute()
+                )
+
+                deleted_count += 1
+
+            if file_path:
+                path = Path(file_path)
+
+                if path.exists():
+                    path.unlink()
+
+        return {
+            "message": f"Deleted {deleted_count} dataset(s) older than {days} days.",
+            "deleted_count": deleted_count,
+        }

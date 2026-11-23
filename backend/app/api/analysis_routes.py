@@ -12,3 +12,8 @@ router = APIRouter(
 @router.post("/run/{dataset_id}")
 def run_analysis(dataset_id: str):
     return AnalysisService.run_analysis(dataset_id)
+
+
+@router.get("/")
+def get_analyses():
+    return AnalysisService.get_all_analyses()
